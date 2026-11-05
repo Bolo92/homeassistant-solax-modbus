@@ -2,6 +2,7 @@
 #   main  -> kopia upstream/main
 #   tagi  -> kopia tagow upstream
 #   bolo  -> wlasne commity przeniesione (rebase) na najnowsze wydanie upstream
+#   wydanie <wersja-upstream>-bolo.N -> GitHub Release z kodem bolo (z niego instaluje HACS)
 #
 # Wymaga sekretu SYNC_TOKEN: fine-grained PAT z dostepem tylko do tego repo,
 # uprawnienia "Contents: Read and write" i "Workflows: Read and write".
@@ -11,6 +12,9 @@ name: Sync upstream (bolo)
 on:
   schedule:
     - cron: "17 4 * * *"
+  push:
+    branches:
+      - bolo
   workflow_dispatch:
 
 permissions:
@@ -60,6 +64,7 @@ jobs:
         run: git push --force origin 'refs/tags/*:refs/tags/*'
 
       - name: Rebase bolo
+        id: rebase
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -68,6 +73,7 @@ jobs:
           else
             BASE_REF=upstream/main
           fi
+          echo "base_ref=$BASE_REF" >> "$GITHUB_OUTPUT"
           OLD=$(git rev-parse HEAD)
 
           echo "Wlasne commity na bolo:"
@@ -80,9 +86,39 @@ jobs:
           fi
 
           if [ "$(git rev-parse HEAD)" = "$OLD" ]; then
-            echo "bolo jest juz na $BASE_REF - nic do zrobienia."
+            echo "bolo jest juz na $BASE_REF - nic do przeniesienia."
+          else
+            git push --force-with-lease="bolo:$OLD" origin HEAD:bolo
+            echo "bolo przeniesione na $BASE_REF: $(git rev-parse --short HEAD)"
+          fi
+
+      - name: Release
+        if: env.BASE == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
+          # Jawnie, bo przy remote "upstream" gh domyslnie celowalby w repo wills106.
+          GH_REPO: ${{ github.repository }}
+          BASE_REF: ${{ steps.rebase.outputs.base_ref }}
+        run: |
+          if [ -n "$(git tag --points-at HEAD --list "${BASE_REF}-bolo.*")" ]; then
+            echo "Wydanie dla $(git rev-parse --short HEAD) juz istnieje - nic do zrobienia."
             exit 0
           fi
 
-          git push --force-with-lease="bolo:$OLD" origin HEAD:bolo
-          echo "bolo przeniesione na $BASE_REF: $(git rev-parse --short HEAD)"
+          N=0
+          for t in $(git tag --list "${BASE_REF}-bolo.*"); do
+            n=${t##*-bolo.}
+            case "$n" in ''|*[!0-9]*) continue ;; esac
+            [ "$n" -gt "$N" ] && N=$n
+          done
+          TAG="${BASE_REF}-bolo.$((N + 1))"
+
+          {
+            echo "Wydanie wills106 ${BASE_REF} + zmiany z galezi bolo:"
+            echo
+            git log --reverse --format='- %s' "${BASE_REF}..HEAD"
+          } > "$RUNNER_TEMP/notes.md"
+
+          gh release create "$TAG" --target "$(git rev-parse HEAD)" --title "$TAG" \
+            --notes-file "$RUNNER_TEMP/notes.md" --latest
+          echo "Utworzono wydanie $TAG"
