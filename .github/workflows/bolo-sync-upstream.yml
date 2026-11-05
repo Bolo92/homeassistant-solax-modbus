@@ -1,0 +1,88 @@
+# Synchronizacja forka z wills106/homeassistant-solax-modbus:
+#   main  -> kopia upstream/main
+#   tagi  -> kopia tagow upstream
+#   bolo  -> wlasne commity przeniesione (rebase) na najnowsze wydanie upstream
+#
+# Wymaga sekretu SYNC_TOKEN: fine-grained PAT z dostepem tylko do tego repo,
+# uprawnienia "Contents: Read and write" i "Workflows: Read and write".
+# Bez "Workflows" GitHub odrzuci push, gdy upstream zmieni cos w .github/workflows.
+name: Sync upstream (bolo)
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bolo-sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: wills106/homeassistant-solax-modbus
+  # Na czym opierac galaz bolo:
+  #   release - najnowsze wydanie upstream (to samo, co instaluje HACS z oryginalu)
+  #   main    - najnowszy kod z upstream/main (takze jeszcze niewydane zmiany)
+  BASE: release
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check SYNC_TOKEN
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          if [ -z "$SYNC_TOKEN" ]; then
+            echo "::error::Brak sekretu SYNC_TOKEN (Settings -> Secrets and variables -> Actions)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: bolo
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN }}
+
+      - name: Fetch upstream
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM}.git"
+          git fetch --force --tags upstream "+refs/heads/main:refs/remotes/upstream/main"
+
+      - name: Mirror main
+        run: git push origin refs/remotes/upstream/main:refs/heads/main
+
+      - name: Mirror tags
+        run: git push --force origin 'refs/tags/*:refs/tags/*'
+
+      - name: Rebase bolo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$BASE" = "release" ]; then
+            BASE_REF=$(gh api "repos/${UPSTREAM}/releases/latest" --jq .tag_name)
+          else
+            BASE_REF=upstream/main
+          fi
+          OLD=$(git rev-parse HEAD)
+
+          echo "Wlasne commity na bolo:"
+          git log --oneline upstream/main..HEAD
+
+          if ! git rebase --onto "$BASE_REF" upstream/main; then
+            git rebase --abort
+            echo "::error::Konflikt przy przenoszeniu bolo na $BASE_REF - trzeba zrobic rebase recznie."
+            exit 1
+          fi
+
+          if [ "$(git rev-parse HEAD)" = "$OLD" ]; then
+            echo "bolo jest juz na $BASE_REF - nic do zrobienia."
+            exit 0
+          fi
+
+          git push --force-with-lease="bolo:$OLD" origin HEAD:bolo
+          echo "bolo przeniesione na $BASE_REF: $(git rev-parse --short HEAD)"
